@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import prisma from './prisma';
 
 export async function getSettings() {
@@ -100,7 +101,7 @@ export async function createDownstreamTask(
       assignedAgentId: taskData.assignedAgentId,
       status: taskData.status ?? 'queued',
       priority: taskData.priority ?? 4,
-      payloadJson: taskData.payloadJson,
+      payloadJson: taskData.payloadJson as unknown as Prisma.InputJsonValue,
     },
   });
 }
