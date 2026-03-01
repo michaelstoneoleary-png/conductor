@@ -49,8 +49,7 @@ services:
         fromService:
           name: conductor-backend
           type: web
-          # hostWithScheme gives the full https:// URL, not just the bare hostname
-          property: hostWithScheme
+          property: host
 
 databases:
   - name: conductor-db
