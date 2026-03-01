@@ -1,5 +1,5 @@
 import prisma from '../lib/prisma';
-import { canClaimTask } from '../lib/governance';
+import { canClaimTask, checkPerRunTokenCap } from '../lib/governance';
 import { runCoSTask } from '../agents/cos';
 import { runPMTask } from '../agents/pm';
 import { runUXTask } from '../agents/ux';
@@ -53,6 +53,13 @@ async function executeTask(task: Awaited<ReturnType<typeof claimNextTask>>) {
     return;
   }
 
+  // Kill-switch re-check at execution time (race condition guard)
+  if (!agent.isEnabled) {
+    logger.warn({ taskId, agentId: assignedAgentId }, 'Agent disabled at execution time — requeueing');
+    await prisma.task.update({ where: { id: taskId }, data: { status: 'queued', startedAt: null } });
+    return;
+  }
+
   const model = agent.model;
 
   await prisma.agent.update({
@@ -92,6 +99,30 @@ async function executeTask(task: Awaited<ReturnType<typeof claimNextTask>>) {
         break;
       default:
         throw new Error(`Unknown role: ${assignedRole}`);
+    }
+
+    // Per-run token cap enforcement: inspect the run that was just written and
+    // fail it if it exceeded the cap set in Settings.
+    const completedRun = await prisma.run.findFirst({
+      where: { taskId, status: 'succeeded' },
+      orderBy: { startedAt: 'desc' },
+    });
+
+    if (completedRun) {
+      const { allowed, reason } = await checkPerRunTokenCap(completedRun.tokenIn, completedRun.tokenOut);
+      if (!allowed) {
+        logger.warn({ taskId, runId: completedRun.id, reason }, 'Per-run token cap exceeded — marking run failed');
+        await prisma.run.update({
+          where: { id: completedRun.id },
+          data: { status: 'failed', endedAt: new Date() },
+        });
+        await prisma.task.update({
+          where: { id: taskId },
+          data: { status: 'failed', endedAt: new Date() },
+        });
+        await prisma.agent.update({ where: { id: assignedAgentId }, data: { status: 'idle' } });
+        return;
+      }
     }
 
     const halted = result && 'halted' in result && result.halted;

@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import prisma from '../lib/prisma';
+import { assertConductorRole } from '../lib/governance';
 
 const CreateDirectiveSchema = z.object({
   transcript: z.string().min(1).max(10000),
@@ -10,6 +11,11 @@ const CreateDirectiveSchema = z.object({
 
 export async function directiveRoutes(app: FastifyInstance) {
   app.post('/api/directives', async (req, reply) => {
+    // Governance: only the Conductor may issue directives.
+    // The caller declares their role via the X-Conductor-Role header.
+    const callerRole = (req.headers['x-conductor-role'] as string | undefined) ?? '';
+    assertConductorRole(callerRole);
+
     try {
       const body = CreateDirectiveSchema.parse(req.body);
 
@@ -30,7 +36,7 @@ export async function directiveRoutes(app: FastifyInstance) {
         data: {
           directiveId: directive.id,
           initiativeId: body.initiativeId,
-          createdByRole: 'CEO',
+          createdByRole: 'conductor',
           assignedRole: 'CoS',
           assignedAgentId: cosAgent.id,
           status: 'queued',

@@ -15,8 +15,12 @@ async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
 
 export const api = {
   get: <T>(path: string) => fetchAPI<T>(path),
-  post: <T>(path: string, body: unknown) =>
-    fetchAPI<T>(path, { method: 'POST', body: JSON.stringify(body) }),
+  post: <T>(path: string, body: unknown, extraHeaders?: Record<string, string>) =>
+    fetchAPI<T>(path, {
+      method: 'POST',
+      body: JSON.stringify(body),
+      headers: extraHeaders,
+    }),
   patch: <T>(path: string, body: unknown) =>
     fetchAPI<T>(path, { method: 'PATCH', body: JSON.stringify(body) }),
 };

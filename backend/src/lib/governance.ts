@@ -64,3 +64,55 @@ export async function checkReviewLoops(taskId: string): Promise<{ exceeded: bool
   const task = await prisma.task.findUnique({ where: { id: taskId } });
   return { exceeded: (task?.loopCount ?? 0) >= maxLoops, maxLoops };
 }
+
+/**
+ * Governance rule: only the CoS may create tasks for other roles.
+ *
+ * All agents that need to spawn downstream work must call this function
+ * instead of calling prisma.task.create directly. It enforces that
+ * createdByRole is always 'CoS', preventing any other role from
+ * autonomously assigning work across the org without CoS authority.
+ */
+export async function createDownstreamTask(
+  callerRole: string,
+  taskData: {
+    directiveId?: string | null;
+    initiativeId?: string | null;
+    assignedRole: string;
+    assignedAgentId: string;
+    status?: string;
+    priority?: number;
+    payloadJson: Record<string, unknown>;
+  }
+) {
+  if (callerRole !== 'CoS') {
+    throw new Error(
+      `Governance violation: only CoS can create tasks for other roles (caller: ${callerRole})`
+    );
+  }
+
+  return prisma.task.create({
+    data: {
+      directiveId: taskData.directiveId ?? null,
+      initiativeId: taskData.initiativeId ?? null,
+      createdByRole: 'CoS',
+      assignedRole: taskData.assignedRole,
+      assignedAgentId: taskData.assignedAgentId,
+      status: taskData.status ?? 'queued',
+      priority: taskData.priority ?? 4,
+      payloadJson: taskData.payloadJson,
+    },
+  });
+}
+
+/**
+ * Governance rule: only the Conductor (human operator) may create directives.
+ * Call this at the start of POST /api/directives to enforce the rule.
+ */
+export function assertConductorRole(role: string | undefined): void {
+  if (role !== 'conductor') {
+    throw Object.assign(new Error('Governance violation: only the Conductor may create directives'), {
+      statusCode: 403,
+    });
+  }
+}

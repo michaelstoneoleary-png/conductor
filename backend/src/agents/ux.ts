@@ -1,5 +1,6 @@
 import prisma from '../lib/prisma';
 import { estimateCost } from '../lib/cost';
+import { createDownstreamTask } from '../lib/governance';
 
 export async function runUXTask(taskId: string, agentId: string, model: string) {
   const task = await prisma.task.findUnique({ where: { id: taskId } });
@@ -69,17 +70,15 @@ export async function runUXTask(taskId: string, agentId: string, model: string) 
 
   const dev1Agent = await prisma.agent.findUnique({ where: { role: 'Dev1' } });
   if (dev1Agent) {
-    await prisma.task.create({
-      data: {
-        directiveId: task.directiveId,
-        initiativeId: task.initiativeId,
-        createdByRole: 'CoS',
-        assignedRole: 'Dev1',
-        assignedAgentId: dev1Agent.id,
-        status: 'queued',
-        priority: 4,
-        payloadJson: { ux_spec: uxSpec },
-      },
+    // Governance: only CoS may create tasks for other roles.
+    // UX acts as a CoS delegate within the approved pipeline.
+    await createDownstreamTask('CoS', {
+      directiveId: task.directiveId,
+      initiativeId: task.initiativeId,
+      assignedRole: 'Dev1',
+      assignedAgentId: dev1Agent.id,
+      priority: 4,
+      payloadJson: { ux_spec: uxSpec },
     });
   }
 

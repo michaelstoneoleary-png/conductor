@@ -5,7 +5,8 @@ services:
     plan: starter
     rootDir: backend
     buildCommand: npm install && npx prisma generate && npm run build
-    startCommand: npm start
+    # Run migrations before starting so a fresh Postgres is always up to date
+    startCommand: npx prisma migrate deploy && npm start
     envVars:
       - key: DATABASE_URL
         fromDatabase:
@@ -41,13 +42,15 @@ services:
     plan: starter
     rootDir: frontend
     buildCommand: npm install && npm run build
-    startCommand: npm start
+    # Use $PORT so Render's dynamic port assignment is respected
+    startCommand: node_modules/.bin/next start -p $PORT -H 0.0.0.0
     envVars:
       - key: NEXT_PUBLIC_BACKEND_URL
         fromService:
           name: conductor-backend
           type: web
-          property: host
+          # hostWithScheme gives the full https:// URL, not just the bare hostname
+          property: hostWithScheme
 
 databases:
   - name: conductor-db

@@ -1,6 +1,6 @@
 import prisma from '../lib/prisma';
 import { estimateCost } from '../lib/cost';
-import { checkReviewLoops } from '../lib/governance';
+import { checkReviewLoops, createDownstreamTask } from '../lib/governance';
 
 export async function runDev2Task(taskId: string, agentId: string, model: string) {
   const task = await prisma.task.findUnique({ where: { id: taskId } });
@@ -82,17 +82,15 @@ export async function runDev2Task(taskId: string, agentId: string, model: string
   if (reviewStatus === 'approve' || reviewStatus === 'approve_with_changes') {
     const qaAgent = await prisma.agent.findUnique({ where: { role: 'QA' } });
     if (qaAgent) {
-      await prisma.task.create({
-        data: {
-          directiveId: task.directiveId,
-          initiativeId: task.initiativeId,
-          createdByRole: 'CoS',
-          assignedRole: 'QA',
-          assignedAgentId: qaAgent.id,
-          status: 'queued',
-          priority: 4,
-          payloadJson: JSON.parse(JSON.stringify({ review, code_change: payload.code_change })),
-        },
+      // Governance: only CoS may create tasks for other roles.
+      // Dev2 acts as a CoS delegate within the approved pipeline.
+      await createDownstreamTask('CoS', {
+        directiveId: task.directiveId,
+        initiativeId: task.initiativeId,
+        assignedRole: 'QA',
+        assignedAgentId: qaAgent.id,
+        priority: 4,
+        payloadJson: JSON.parse(JSON.stringify({ review, code_change: payload.code_change })),
       });
     }
   }

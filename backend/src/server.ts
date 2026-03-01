@@ -21,6 +21,17 @@ const app = Fastify({
   },
 });
 
+// Global error handler — ensures all unhandled errors return { success, data, error }
+app.setErrorHandler((err, _req, reply) => {
+  logger.error(err);
+  const status = err.statusCode ?? 500;
+  reply.status(status).send({
+    success: false,
+    data: null,
+    error: err.message ?? 'Internal server error',
+  });
+});
+
 async function start() {
   await app.register(cors, {
     origin: true,
@@ -39,7 +50,8 @@ async function start() {
   await app.register(settingsRoutes);
 
   const PORT = parseInt(process.env.PORT ?? '8080', 10);
-  const HOST = 'localhost';
+  // Must bind to 0.0.0.0 so Render (and any container host) can route traffic in
+  const HOST = '0.0.0.0';
 
   try {
     await prisma.$connect();

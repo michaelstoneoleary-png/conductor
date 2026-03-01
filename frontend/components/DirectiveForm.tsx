@@ -15,7 +15,14 @@ export default function DirectiveForm({ onSubmit }: { onSubmit?: () => void }) {
     setResult(null);
 
     try {
-      const data = await api.post<{ directive: { id: string }; task: { id: string } }>('/api/directives', { transcript: transcript.trim() });
+      // Governance: the Conductor (human operator) is the only party allowed to
+      // create directives. We declare this via the X-Conductor-Role header so
+      // the backend can enforce the rule.
+      const data = await api.post<{ directive: { id: string }; task: { id: string } }>(
+        '/api/directives',
+        { transcript: transcript.trim() },
+        { 'X-Conductor-Role': 'conductor' }
+      );
       setResult({ success: true, message: `Directive created. CoS task ${data.task.id.slice(-8)} queued.` });
       setTranscript('');
       onSubmit?.();

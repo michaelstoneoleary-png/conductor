@@ -1,5 +1,6 @@
 import prisma from '../lib/prisma';
 import { estimateCost } from '../lib/cost';
+import { createDownstreamTask } from '../lib/governance';
 
 export async function runPMTask(taskId: string, agentId: string, model: string) {
   const task = await prisma.task.findUnique({ where: { id: taskId } });
@@ -73,17 +74,15 @@ export async function runPMTask(taskId: string, agentId: string, model: string) 
 
   const uxAgent = await prisma.agent.findUnique({ where: { role: 'UX' } });
   if (uxAgent) {
-    await prisma.task.create({
-      data: {
-        directiveId: task.directiveId,
-        initiativeId: task.initiativeId,
-        createdByRole: 'CoS',
-        assignedRole: 'UX',
-        assignedAgentId: uxAgent.id,
-        status: 'queued',
-        priority: 4,
-        payloadJson: { prd, directive },
-      },
+    // Governance: only CoS may create tasks for other roles.
+    // PM acts as a CoS delegate within the approved pipeline.
+    await createDownstreamTask('CoS', {
+      directiveId: task.directiveId,
+      initiativeId: task.initiativeId,
+      assignedRole: 'UX',
+      assignedAgentId: uxAgent.id,
+      priority: 4,
+      payloadJson: { prd, directive },
     });
   }
 
