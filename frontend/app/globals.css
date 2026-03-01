@@ -1,0 +1,99 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #0a0a0a;
+  --panel: #111111;
+  --card: #1a1a1a;
+  --border: #2a2a2a;
+  --text: #f4f4f5;
+  --muted: #888888;
+  --accent: #6366f1;
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  font-size: 14px;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.badge-idle { background: #1f2937; color: #9ca3af; }
+.badge-active { background: #064e3b; color: #34d399; }
+.badge-disabled { background: #1f1f1f; color: #555; }
+.badge-queued { background: #1e293b; color: #7dd3fc; }
+.badge-running { background: #064e3b; color: #34d399; }
+.badge-done { background: #052e16; color: #4ade80; }
+.badge-failed { background: #450a0a; color: #f87171; }
+.badge-needs_approval { background: #451a03; color: #fb923c; }
+.badge-canceled { background: #1c1c1c; color: #555; }
+.badge-pending { background: #451a03; color: #fb923c; }
+.badge-approved { background: #052e16; color: #4ade80; }
+.badge-rejected { background: #450a0a; color: #f87171; }
+
+.dot-healthy { background: #22c55e; }
+.dot-degraded { background: #f59e0b; }
+.dot-down { background: #ef4444; }
+
+.btn {
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  border: none;
+  transition: opacity 0.15s;
+}
+
+.btn:hover { opacity: 0.85; }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.btn-primary { background: var(--accent); color: white; }
+.btn-secondary { background: var(--card); color: var(--text); border: 1px solid var(--border); }
+.btn-danger { background: #7f1d1d; color: #fca5a5; }
+.btn-success { background: #14532d; color: #86efac; }
+
+input, textarea, select {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 8px 12px;
+  font-size: 14px;
+  outline: none;
+  width: 100%;
+}
+
+input:focus, textarea:focus, select:focus {
+  border-color: var(--accent);
+}
+
+table { width: 100%; border-collapse: collapse; }
+th { text-align: left; padding: 8px 12px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); border-bottom: 1px solid var(--border); }
+td { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: rgba(255,255,255,0.02); }

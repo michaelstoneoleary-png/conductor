@@ -1,0 +1,10 @@
+{
+  "name": "@conductor/shared",
+  "version": "1.0.0",
+  "description": "Shared TypeScript types for Conductor",
+  "main": "types.ts",
+  "scripts": {},
+  "keywords": [],
+  "author": "",
+  "license": "MIT"
+}

@@ -1,0 +1,167 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Agent {
+  id             String       @id @default(cuid())
+  role           String       @unique
+  name           String
+  provider       String
+  model          String
+  isEnabled      Boolean      @default(true)
+  status         String       @default("idle")
+  lastActiveAt   DateTime?
+  confidenceAvg  Float        @default(0)
+  tasksCompleted Int          @default(0)
+  tasksTotal     Int          @default(0)
+  createdAt      DateTime     @default(now())
+  tasks          Task[]
+  runs           Run[]
+  evaluations    Evaluation[]
+}
+
+model Initiative {
+  id         String      @id @default(cuid())
+  title      String
+  objective  String
+  status     String      @default("not_started")
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+  directives Directive[]
+  tasks      Task[]
+  artifacts  Artifact[]
+}
+
+model Directive {
+  id           String      @id @default(cuid())
+  initiativeId String?
+  initiative   Initiative? @relation(fields: [initiativeId], references: [id])
+  inputMode    String      @default("text")
+  transcript   String
+  planJson     Json?
+  planApproved Boolean     @default(false)
+  createdAt    DateTime    @default(now())
+  tasks        Task[]
+}
+
+model Task {
+  id               String      @id @default(cuid())
+  initiativeId     String?
+  initiative       Initiative? @relation(fields: [initiativeId], references: [id])
+  directiveId      String?
+  directive        Directive?  @relation(fields: [directiveId], references: [id])
+  createdByRole    String
+  assignedRole     String
+  assignedAgentId  String?
+  agent            Agent?      @relation(fields: [assignedAgentId], references: [id])
+  status           String      @default("queued")
+  priority         Int         @default(5)
+  payloadJson      Json        @default("{}")
+  loopCount        Int         @default(0)
+  targetEnv        String      @default("staging")
+  requiresApproval Boolean     @default(false)
+  createdAt        DateTime    @default(now())
+  startedAt        DateTime?
+  endedAt          DateTime?
+  runs             Run[]
+  artifacts        Artifact[]
+  approvals        Approval[]
+}
+
+model Run {
+  id         String     @id @default(cuid())
+  taskId     String
+  task       Task       @relation(fields: [taskId], references: [id])
+  agentId    String?
+  agent      Agent?     @relation(fields: [agentId], references: [id])
+  role       String
+  provider   String
+  model      String
+  status     String     @default("running")
+  tokenIn    Int        @default(0)
+  tokenOut   Int        @default(0)
+  costEst    Float      @default(0)
+  latencyMs  Int        @default(0)
+  outputJson Json?
+  startedAt  DateTime   @default(now())
+  endedAt    DateTime?
+  events     Event[]
+  artifacts  Artifact[]
+}
+
+model Artifact {
+  id           String      @id @default(cuid())
+  initiativeId String?
+  initiative   Initiative? @relation(fields: [initiativeId], references: [id])
+  taskId       String?
+  task         Task?       @relation(fields: [taskId], references: [id])
+  runId        String?
+  run          Run?        @relation(fields: [runId], references: [id])
+  type         String
+  title        String
+  summary      String
+  contentJson  Json
+  visibility   String      @default("internal")
+  createdAt    DateTime    @default(now())
+}
+
+model Approval {
+  id              String    @id @default(cuid())
+  taskId          String
+  task            Task      @relation(fields: [taskId], references: [id])
+  requestedAction String
+  status          String    @default("pending")
+  decisionNotes   String?
+  createdAt       DateTime  @default(now())
+  decidedAt       DateTime?
+}
+
+model Event {
+  id          String   @id @default(cuid())
+  runId       String?
+  run         Run?     @relation(fields: [runId], references: [id])
+  actor       String
+  eventType   String
+  level       String   @default("info")
+  message     String
+  detailsJson Json     @default("{}")
+  createdAt   DateTime @default(now())
+}
+
+model Evaluation {
+  id                String   @id @default(cuid())
+  agentId           String
+  agent             Agent    @relation(fields: [agentId], references: [id])
+  taskId            String?
+  conductorScore    Int?
+  iterationCount    Int      @default(1)
+  initialConfidence Float    @default(0)
+  outcomeSuccess    Boolean?
+  notes             String?
+  createdAt         DateTime @default(now())
+}
+
+model Settings {
+  id               String   @id @default("global")
+  globalKillSwitch Boolean  @default(false)
+  dailyTokenCap    Int      @default(500000)
+  perRunTokenCap   Int      @default(8000)
+  maxParallelRuns  Int      @default(3)
+  maxReviewLoops   Int      @default(2)
+  updatedAt        DateTime @updatedAt
+}
+
+model Tool {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String
+  category    String
+  isEnabled   Boolean  @default(false)
+  configJson  Json     @default("{}")
+  createdAt   DateTime @default(now())
+}
