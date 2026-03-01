@@ -168,6 +168,18 @@ async function executeTask(task: Awaited<ReturnType<typeof claimNextTask>>) {
         data: { status: 'failed', endedAt: new Date() },
       });
     }
+
+    // Mark the open evaluation as failed so calibration data is accurate.
+    const openEval = await prisma.evaluation.findFirst({
+      where: { taskId, outcomeSuccess: null },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (openEval) {
+      await prisma.evaluation.update({
+        where: { id: openEval.id },
+        data: { outcomeSuccess: false },
+      });
+    }
   }
 }
 

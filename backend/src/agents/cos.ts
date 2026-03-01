@@ -1,5 +1,6 @@
 import prisma from '../lib/prisma';
 import { estimateCost } from '../lib/cost';
+import { assessConfidence, markEvaluationOutcome } from '../lib/confidence';
 
 export async function runCoSTask(taskId: string, agentId: string, model: string) {
   const task = await prisma.task.findUnique({
@@ -21,18 +22,39 @@ export async function runCoSTask(taskId: string, agentId: string, model: string)
 
   const startTime = Date.now();
 
-  const logEvent = async (message: string, eventType: string = 'info') => {
+  const logEvent = async (message: string, eventType: string = 'info', level = 'info') => {
     await prisma.event.create({
       data: {
         runId: run.id,
         actor: 'CoS',
         eventType,
-        level: 'info',
+        level,
         message,
         detailsJson: {},
       },
     });
   };
+
+  // Pre-task confidence assessment
+  const payload = task.payloadJson as Record<string, unknown>;
+  const { score, reasons, action, evaluationId } = await assessConfidence('CoS', agentId, taskId, payload);
+
+  if (action === 'block') {
+    await logEvent(`Confidence too low (${(score * 100).toFixed(0)}%) — halting. Missing: ${reasons.join('; ')}`, 'confidence', 'warn');
+    await prisma.approval.create({
+      data: { taskId, requestedAction: `CoS confidence too low (${(score * 100).toFixed(0)}%). Needs: ${reasons.join(', ')}`, status: 'pending' },
+    });
+    await prisma.run.update({
+      where: { id: run.id },
+      data: { status: 'failed', tokenIn: 0, tokenOut: 0, costEst: 0, latencyMs: Date.now() - startTime, endedAt: new Date() },
+    });
+    await prisma.task.update({ where: { id: taskId }, data: { status: 'needs_approval' } });
+    return { runId: run.id, halted: true, reason: `Low confidence (${(score * 100).toFixed(0)}%)`, evaluationId };
+  }
+
+  if (action === 'warn') {
+    await logEvent(`Confidence warning (${(score * 100).toFixed(0)}%) — proceeding with caution. Notes: ${reasons.join('; ')}`, 'confidence', 'warn');
+  }
 
   await logEvent('Analyzing directive', 'analysis');
 
@@ -166,5 +188,6 @@ export async function runCoSTask(taskId: string, agentId: string, model: string)
 
   await logEvent(`Plan generated. Created ${downstreamTasks.length} downstream task(s). Artifact: ${artifact.id}`, 'complete');
 
-  return { runId: run.id, artifactId: artifact.id, downstreamTasks };
+  await markEvaluationOutcome(evaluationId, true);
+  return { runId: run.id, artifactId: artifact.id, downstreamTasks, evaluationId };
 }

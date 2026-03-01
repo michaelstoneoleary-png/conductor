@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import prisma from '../lib/prisma';
+import { updateAgentConfidenceAvg } from '../lib/confidence';
 
 export async function taskRoutes(app: FastifyInstance) {
   app.get('/api/tasks', async (req, reply) => {
@@ -33,7 +34,13 @@ export async function taskRoutes(app: FastifyInstance) {
       },
     });
     if (!task) return reply.status(404).send({ success: false, data: null, error: 'Not found' });
-    return reply.send({ success: true, data: task });
+
+    const evaluations = await prisma.evaluation.findMany({
+      where: { taskId: id },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    return reply.send({ success: true, data: { ...task, evaluations } });
   });
 
   app.post('/api/tasks/claim', async (_req, reply) => {
@@ -99,5 +106,26 @@ export async function taskRoutes(app: FastifyInstance) {
     }
 
     return reply.send({ success: true, data: { id, status: body.status } });
+  });
+
+  app.post('/api/evaluations/:id/score', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = req.body as { conductorScore: number; notes?: string };
+
+    if (!Number.isInteger(body.conductorScore) || body.conductorScore < 1 || body.conductorScore > 10) {
+      return reply.status(400).send({ success: false, data: null, error: 'conductorScore must be an integer 1–10' });
+    }
+
+    const evaluation = await prisma.evaluation.findUnique({ where: { id } });
+    if (!evaluation) return reply.status(404).send({ success: false, data: null, error: 'Evaluation not found' });
+
+    const updated = await prisma.evaluation.update({
+      where: { id },
+      data: { conductorScore: body.conductorScore, notes: body.notes ?? null },
+    });
+
+    await updateAgentConfidenceAvg(evaluation.agentId);
+
+    return reply.send({ success: true, data: updated });
   });
 }

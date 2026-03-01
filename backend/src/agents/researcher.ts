@@ -1,5 +1,6 @@
 import prisma from '../lib/prisma';
 import { estimateCost } from '../lib/cost';
+import { assessConfidence, markEvaluationOutcome } from '../lib/confidence';
 
 export async function runResearchTask(taskId: string, agentId: string, model: string) {
   const task = await prisma.task.findUnique({ where: { id: taskId } });
@@ -11,13 +12,34 @@ export async function runResearchTask(taskId: string, agentId: string, model: st
 
   const startTime = Date.now();
 
-  const logEvent = async (message: string) => {
+  const logEvent = async (message: string, level = 'info') => {
     await prisma.event.create({
-      data: { runId: run.id, actor: 'Research', eventType: 'info', level: 'info', message, detailsJson: {} },
+      data: { runId: run.id, actor: 'Research', eventType: 'info', level, message, detailsJson: {} },
     });
   };
 
   const payload = task.payloadJson as Record<string, unknown>;
+
+  // Pre-task confidence assessment
+  const { score, reasons, action, evaluationId } = await assessConfidence('Research', agentId, taskId, payload);
+
+  if (action === 'block') {
+    await logEvent(`Confidence too low (${(score * 100).toFixed(0)}%) — halting. Missing: ${reasons.join('; ')}`, 'warn');
+    await prisma.approval.create({
+      data: { taskId, requestedAction: `Research confidence too low (${(score * 100).toFixed(0)}%). Needs: ${reasons.join(', ')}`, status: 'pending' },
+    });
+    await prisma.run.update({
+      where: { id: run.id },
+      data: { status: 'failed', tokenIn: 0, tokenOut: 0, costEst: 0, latencyMs: Date.now() - startTime, endedAt: new Date() },
+    });
+    await prisma.task.update({ where: { id: taskId }, data: { status: 'needs_approval' } });
+    return { runId: run.id, halted: true, reason: `Low confidence (${(score * 100).toFixed(0)}%)`, evaluationId };
+  }
+
+  if (action === 'warn') {
+    await logEvent(`Confidence warning (${(score * 100).toFixed(0)}%) — proceeding with caution. Notes: ${reasons.join('; ')}`, 'warn');
+  }
+
   const topic = (payload.topic as string) ?? 'General research topic';
 
   await logEvent(`Researching: ${topic.slice(0, 80)}`);
@@ -81,5 +103,6 @@ export async function runResearchTask(taskId: string, agentId: string, model: st
   });
 
   await logEvent(`Research complete. Confidence: ${(research.confidence_level * 100).toFixed(0)}%. Artifact: ${artifact.id}`);
-  return { runId: run.id, artifactId: artifact.id };
+  await markEvaluationOutcome(evaluationId, true);
+  return { runId: run.id, artifactId: artifact.id, evaluationId };
 }
