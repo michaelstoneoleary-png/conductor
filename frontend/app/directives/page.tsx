@@ -5,7 +5,7 @@ import api from '../../lib/api';
 import DirectiveForm from '../../components/DirectiveForm';
 import Link from 'next/link';
 
-const fetcher = (path: string) => api.get(path);
+const fetcher = <T,>(path: string) => api.get<T>(path);
 
 interface DirectiveTask {
   id: string;

@@ -7,7 +7,7 @@ import ControlsPanel from '../components/ControlsPanel';
 import ArtifactCard from '../components/ArtifactCard';
 import Link from 'next/link';
 
-const fetcher = (path: string) => api.get(path);
+const fetcher = <T,>(path: string) => api.get<T>(path);
 
 interface KPIs {
   tokensTodayIn: number;

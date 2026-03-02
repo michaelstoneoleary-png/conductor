@@ -7,7 +7,7 @@ import api from '../../../lib/api';
 import TaskTimeline from '../../../components/TaskTimeline';
 import ArtifactCard from '../../../components/ArtifactCard';
 
-const fetcher = (path: string) => api.get(path);
+const fetcher = <T,>(path: string) => api.get<T>(path);
 
 type Evaluation = {
   id: string;

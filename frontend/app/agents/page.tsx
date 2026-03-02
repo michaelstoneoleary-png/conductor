@@ -4,7 +4,7 @@ import useSWR from 'swr';
 import { useState } from 'react';
 import api from '../../lib/api';
 
-const fetcher = (path: string) => api.get(path);
+const fetcher = <T,>(path: string) => api.get<T>(path);
 
 interface Agent {
   id: string;
@@ -24,7 +24,7 @@ export default function AgentsPage() {
   const { data, mutate } = useSWR<Agent[]>('/api/agents', fetcher, { refreshInterval: 5000 });
   const [editing, setEditing] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<{ name: string; model: string }>({ name: '', model: '' });
-  const [newAgent, setNewAgent] = useState({ role: '', name: '', provider: 'openai' as const, model: '' });
+  const [newAgent, setNewAgent] = useState<{ role: string; name: string; provider: 'openai' | 'anthropic'; model: string }>({ role: '', name: '', provider: 'openai', model: '' });
   const [saving, setSaving] = useState(false);
 
   const toggleEnabled = async (agent: Agent) => {

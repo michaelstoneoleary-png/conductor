@@ -5,7 +5,7 @@ import Link from 'next/link';
 import api from '../../../lib/api';
 import ArtifactCard from '../../../components/ArtifactCard';
 
-const fetcher = (path: string) => api.get(path);
+const fetcher = <T,>(path: string) => api.get<T>(path);
 
 export default function InitiativePage({ params }: { params: { id: string } }) {
   const { data } = useSWR(`/api/initiatives/${params.id}`, fetcher, { refreshInterval: 5000 });
