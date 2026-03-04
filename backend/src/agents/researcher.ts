@@ -1,6 +1,27 @@
 import prisma from '../lib/prisma';
 import { estimateCost } from '../lib/cost';
 import { assessConfidence, markEvaluationOutcome } from '../lib/confidence';
+import { callLLM, parseJSON, toJson } from '../lib/llm';
+
+const SYSTEM_PROMPT = `You are a Research Analyst AI agent at an autonomous AI company called Conductor.
+Your role is to receive a research topic and produce actionable, well-reasoned findings.
+
+You must respond with a single valid JSON object (no markdown, no prose outside JSON) with these exact fields:
+{
+  "topic": "The research topic as you understand it",
+  "key_findings": ["specific finding 1", "specific finding 2"],
+  "sources": [
+    { "name": "source description", "reliability": "high" | "medium" | "low" }
+  ],
+  "confidence_level": 0.0,
+  "opportunities": ["specific opportunity 1"],
+  "risks": ["specific risk 1"],
+  "recommendations": ["specific actionable recommendation 1"],
+  "follow_up_questions": ["question that would deepen this research"]
+}
+
+confidence_level: a number between 0.0 and 1.0 representing how confident you are in these findings.
+Be specific and substantive. Draw on real knowledge about the topic. Do not produce generic placeholder text.`;
 
 export async function runResearchTask(taskId: string, agentId: string, model: string) {
   const task = await prisma.task.findUnique({ where: { id: taskId } });
@@ -19,8 +40,6 @@ export async function runResearchTask(taskId: string, agentId: string, model: st
   };
 
   const payload = task.payloadJson as Record<string, unknown>;
-
-  // Pre-task confidence assessment
   const { score, reasons, action, evaluationId } = await assessConfidence('Research', agentId, taskId, payload);
 
   if (action === 'block') {
@@ -41,52 +60,35 @@ export async function runResearchTask(taskId: string, agentId: string, model: st
   }
 
   const topic = (payload.topic as string) ?? 'General research topic';
+  const cosPlan = payload.cos_plan ? JSON.stringify(payload.cos_plan, null, 2) : '';
 
   await logEvent(`Researching: ${topic.slice(0, 80)}`);
-  await logEvent('Gathering sources and data');
-  await logEvent('Synthesizing findings');
+  await logEvent('Gathering and synthesizing findings');
 
-  const research = {
-    topic: topic.slice(0, 200),
-    key_findings: [
-      'The market is fragmented with 5-8 major players and many niche competitors',
-      'Current leaders are differentiated primarily on pricing, integrations, and enterprise features',
-      'AI-native solutions are emerging as a distinct category vs legacy tools adding AI features',
-      'User expectations around latency and reliability are increasing',
-      'Open source alternatives are gaining traction in developer-first segments',
-    ],
-    sources: [
-      { name: 'Industry analyst reports (G2, Gartner)', reliability: 'high' },
-      { name: 'Company websites and documentation', reliability: 'medium' },
-      { name: 'Community forums and developer discussions', reliability: 'medium' },
-      { name: 'Job postings as signal for technology direction', reliability: 'medium' },
-    ],
-    confidence_level: 0.78,
-    opportunities: [
-      'Underserved mid-market segment with complex needs but limited budget',
-      'Lack of truly autonomous operation in current solutions',
-      'Poor developer experience in incumbent solutions',
-    ],
-    risks: [
-      'Well-funded incumbents can copy features quickly',
-      'Customer switching costs are high once integrated',
-      'Regulatory landscape for AI agents is evolving',
-    ],
-    recommendations: [
-      'Focus on a specific use case to establish beachhead market position',
-      'Prioritize developer experience and extensibility as core differentiators',
-      'Build in auditability and transparency from day one for enterprise buyers',
-    ],
-  };
+  const userPrompt = `Research Topic:\n${topic}${cosPlan ? `\n\nStrategic Context (CoS Plan):\n${cosPlan}` : ''}`;
 
-  const tokenIn = 1000;
-  const tokenOut = 1200;
+  await logEvent('Calling LLM to generate research report');
+  const { content, tokenIn, tokenOut } = await callLLM(model, SYSTEM_PROMPT, userPrompt, 4096);
+
+  interface ResearchOutput {
+    topic: string;
+    key_findings: string[];
+    sources: Array<{ name: string; reliability: 'high' | 'medium' | 'low' }>;
+    confidence_level: number;
+    opportunities: string[];
+    risks: string[];
+    recommendations: string[];
+    follow_up_questions?: string[];
+  }
+
+  const research = parseJSON<ResearchOutput>(content);
+
   const costEst = estimateCost(model, tokenIn, tokenOut);
   const latencyMs = Date.now() - startTime;
 
   await prisma.run.update({
     where: { id: run.id },
-    data: { status: 'succeeded', tokenIn, tokenOut, costEst, latencyMs, outputJson: research, endedAt: new Date() },
+    data: { status: 'succeeded', tokenIn, tokenOut, costEst, latencyMs, outputJson: toJson(research), endedAt: new Date() },
   });
 
   const artifact = await prisma.artifact.create({
@@ -97,7 +99,7 @@ export async function runResearchTask(taskId: string, agentId: string, model: st
       type: 'RESEARCH',
       title: `Research: ${topic.slice(0, 60)}`,
       summary: `Research on "${topic.slice(0, 80)}". Confidence: ${(research.confidence_level * 100).toFixed(0)}%. ${research.key_findings.length} key findings.`,
-      contentJson: research,
+      contentJson: toJson(research),
       visibility: 'exec',
     },
   });

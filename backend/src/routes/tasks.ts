@@ -44,22 +44,24 @@ export async function taskRoutes(app: FastifyInstance) {
   });
 
   app.post('/api/tasks/claim', async (_req, reply) => {
-    const task = await prisma.task.findFirst({
-      where: {
-        status: 'queued',
-        agent: { isEnabled: true },
-      },
-      orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }],
-      include: { agent: true },
-    });
-    if (!task) return reply.send({ success: true, data: null });
+    // Atomic claim: find + update in a transaction to prevent race conditions
+    const task = await prisma.$transaction(async (tx) => {
+      const candidate = await tx.task.findFirst({
+        where: { status: 'queued', agent: { isEnabled: true } },
+        orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }],
+        include: { agent: true },
+      });
+      if (!candidate) return null;
 
-    const claimed = await prisma.task.updateMany({
-      where: { id: task.id, status: 'queued' },
-      data: { status: 'running', startedAt: new Date() },
+      const result = await tx.task.updateMany({
+        where: { id: candidate.id, status: 'queued' },
+        data: { status: 'running', startedAt: new Date() },
+      });
+
+      if (result.count === 0) return null;
+      return candidate;
     });
 
-    if (claimed.count === 0) return reply.send({ success: true, data: null });
     return reply.send({ success: true, data: task });
   });
 

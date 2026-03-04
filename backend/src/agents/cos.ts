@@ -1,6 +1,27 @@
 import prisma from '../lib/prisma';
 import { estimateCost } from '../lib/cost';
 import { assessConfidence, markEvaluationOutcome } from '../lib/confidence';
+import { callLLM, parseJSON, toJson } from '../lib/llm';
+
+const SYSTEM_PROMPT = `You are the Chief of Staff (CoS) of an autonomous AI company called Conductor.
+Your role is to receive a high-level directive from the human Conductor and produce a clear, actionable execution plan.
+
+You must respond with a single valid JSON object (no markdown, no prose outside JSON) with these exact fields:
+{
+  "interpreted_objective": "One sentence summary of what you understand the Conductor wants",
+  "clarifying_questions": ["question1", "question2"],
+  "assumptions": ["assumption1", "assumption2"],
+  "plan_steps": ["step1", "step2", "step3"],
+  "risks": ["risk1", "risk2"],
+  "decisions_needed": ["decision1"],
+  "routing": "research" | "product"
+}
+
+routing rules:
+- Use "research" if the directive is primarily about analysis, market research, competitive intelligence, or information gathering.
+- Use "product" if the directive is about building, designing, or launching something.
+
+Be specific to the actual directive content — do not produce generic plans.`;
 
 export async function runCoSTask(taskId: string, agentId: string, model: string) {
   const task = await prisma.task.findUnique({
@@ -22,20 +43,12 @@ export async function runCoSTask(taskId: string, agentId: string, model: string)
 
   const startTime = Date.now();
 
-  const logEvent = async (message: string, eventType: string = 'info', level = 'info') => {
+  const logEvent = async (message: string, eventType = 'info', level = 'info') => {
     await prisma.event.create({
-      data: {
-        runId: run.id,
-        actor: 'CoS',
-        eventType,
-        level,
-        message,
-        detailsJson: {},
-      },
+      data: { runId: run.id, actor: 'CoS', eventType, level, message, detailsJson: {} },
     });
   };
 
-  // Pre-task confidence assessment
   const payload = task.payloadJson as Record<string, unknown>;
   const { score, reasons, action, evaluationId } = await assessConfidence('CoS', agentId, taskId, payload);
 
@@ -56,50 +69,33 @@ export async function runCoSTask(taskId: string, agentId: string, model: string)
     await logEvent(`Confidence warning (${(score * 100).toFixed(0)}%) — proceeding with caution. Notes: ${reasons.join('; ')}`, 'confidence', 'warn');
   }
 
+  const transcript = task.directive?.transcript ?? (payload.transcript as string) ?? 'No directive provided';
+
   await logEvent('Analyzing directive', 'analysis');
 
-  const transcript = task.directive?.transcript ?? (task.payloadJson as Record<string, string>)?.transcript ?? 'No directive provided';
+  const userPrompt = `Directive from Conductor:\n\n${transcript}`;
 
-  await logEvent('Generating plan', 'planning');
+  await logEvent('Calling LLM to generate plan', 'planning');
+  const { content, tokenIn, tokenOut } = await callLLM(model, SYSTEM_PROMPT, userPrompt);
 
-  const plan = {
-    interpreted_objective: `Execute the following directive: ${transcript.slice(0, 200)}`,
-    clarifying_questions: [
-      'What is the target audience or end user for this work?',
-      'Are there any existing constraints or systems to integrate with?',
-      'What is the preferred timeline or urgency level?',
-    ],
-    assumptions: [
-      'This is a new initiative requiring full planning and execution',
-      'Standard engineering and research workflows apply',
-      'Quality over speed unless otherwise specified',
-    ],
-    plan_steps: [
-      'Research phase: gather background context and competitive landscape',
-      'Planning phase: define scope, requirements, and acceptance criteria',
-      'Execution phase: implement with dev team',
-      'Review phase: QA and code review',
-      'Delivery phase: summarize findings for Conductor',
-    ],
-    risks: [
-      'Scope may expand without clear boundaries',
-      'External data sources may be unavailable',
-    ],
-    decisions_needed: [
-      'Confirm priority vs other active initiatives',
-    ],
-  };
+  interface CosOutput {
+    interpreted_objective: string;
+    clarifying_questions: string[];
+    assumptions: string[];
+    plan_steps: string[];
+    risks: string[];
+    decisions_needed: string[];
+    routing?: string;
+  }
+
+  const plan = parseJSON<CosOutput>(content);
+  const routing = plan.routing ?? 'product';
 
   await logEvent('Creating downstream tasks', 'task_creation');
 
-  const isResearch = transcript.toLowerCase().includes('research') ||
-    transcript.toLowerCase().includes('analys') ||
-    transcript.toLowerCase().includes('competitor') ||
-    transcript.toLowerCase().includes('market');
+  const downstreamTasks: string[] = [];
 
-  const downstreamTasks = [];
-
-  if (isResearch) {
+  if (routing === 'research') {
     const researchAgent = await prisma.agent.findUnique({ where: { role: 'Research' } });
     if (researchAgent) {
       const rt = await prisma.task.create({
@@ -111,10 +107,7 @@ export async function runCoSTask(taskId: string, agentId: string, model: string)
           assignedAgentId: researchAgent.id,
           status: 'queued',
           priority: 4,
-          payloadJson: {
-            topic: transcript,
-            cos_plan: plan,
-          },
+          payloadJson: toJson({ topic: transcript, cos_plan: plan }),
         },
       });
       downstreamTasks.push(rt.id);
@@ -131,34 +124,19 @@ export async function runCoSTask(taskId: string, agentId: string, model: string)
           assignedAgentId: pmAgent.id,
           status: 'queued',
           priority: 4,
-          payloadJson: {
-            directive: transcript,
-            cos_plan: plan,
-          },
+          payloadJson: toJson({ directive: transcript, cos_plan: plan }),
         },
       });
       downstreamTasks.push(pt.id);
     }
   }
 
-  const tokenIn = 1200;
-  const tokenOut = 800;
   const costEst = estimateCost(model, tokenIn, tokenOut);
   const latencyMs = Date.now() - startTime;
 
-  const outputJson = { plan, downstream_tasks_created: downstreamTasks };
-
   await prisma.run.update({
     where: { id: run.id },
-    data: {
-      status: 'succeeded',
-      tokenIn,
-      tokenOut,
-      costEst,
-      latencyMs,
-      outputJson,
-      endedAt: new Date(),
-    },
+    data: { status: 'succeeded', tokenIn, tokenOut, costEst, latencyMs, outputJson: toJson({ plan, downstream_tasks_created: downstreamTasks }), endedAt: new Date() },
   });
 
   const artifact = await prisma.artifact.create({
@@ -169,25 +147,16 @@ export async function runCoSTask(taskId: string, agentId: string, model: string)
       type: 'EXEC_SUMMARY',
       title: `Executive Summary: ${transcript.slice(0, 60)}...`,
       summary: `CoS analyzed directive and created ${downstreamTasks.length} downstream task(s). Plan includes ${plan.plan_steps.length} phases.`,
-      contentJson: {
-        directive: transcript,
-        plan,
-        downstream_tasks: downstreamTasks,
-        decisions_needed: plan.decisions_needed,
-      },
+      contentJson: toJson({ directive: transcript, plan, downstream_tasks: downstreamTasks, decisions_needed: plan.decisions_needed }),
       visibility: 'exec',
     },
   });
 
   if (task.directiveId) {
-    await prisma.directive.update({
-      where: { id: task.directiveId },
-      data: { planJson: plan },
-    });
+    await prisma.directive.update({ where: { id: task.directiveId }, data: { planJson: toJson(plan) } });
   }
 
   await logEvent(`Plan generated. Created ${downstreamTasks.length} downstream task(s). Artifact: ${artifact.id}`, 'complete');
-
   await markEvaluationOutcome(evaluationId, true);
   return { runId: run.id, artifactId: artifact.id, downstreamTasks, evaluationId };
 }

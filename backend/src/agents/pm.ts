@@ -2,6 +2,26 @@ import prisma from '../lib/prisma';
 import { estimateCost } from '../lib/cost';
 import { createDownstreamTask } from '../lib/governance';
 import { assessConfidence, markEvaluationOutcome } from '../lib/confidence';
+import { callLLM, parseJSON, toJson } from '../lib/llm';
+
+const SYSTEM_PROMPT = `You are a Product Manager (PM) AI agent at an autonomous AI company called Conductor.
+Your role is to receive a directive and a strategic plan from the Chief of Staff, then produce a detailed Product Requirements Document (PRD).
+
+You must respond with a single valid JSON object (no markdown, no prose outside JSON) with these exact fields:
+{
+  "prd_title": "Short descriptive title",
+  "problem": "Clear problem statement — why this matters, who is affected",
+  "users": ["user persona 1", "user persona 2"],
+  "non_goals": ["what is explicitly out of scope"],
+  "requirements": ["functional/non-functional requirement 1", "requirement 2"],
+  "acceptance_criteria": ["Given X, when Y, then Z — BDD style"],
+  "milestones": [
+    { "name": "milestone name", "weeks": 2 }
+  ],
+  "open_questions": ["question that needs Conductor input"]
+}
+
+Be specific to the actual directive content. Pull specifics from the CoS plan. Do not produce generic placeholder text.`;
 
 export async function runPMTask(taskId: string, agentId: string, model: string) {
   const task = await prisma.task.findUnique({ where: { id: taskId } });
@@ -20,8 +40,6 @@ export async function runPMTask(taskId: string, agentId: string, model: string) 
   };
 
   const payload = task.payloadJson as Record<string, unknown>;
-
-  // Pre-task confidence assessment
   const { score, reasons, action, evaluationId } = await assessConfidence('PM', agentId, taskId, payload);
 
   if (action === 'block') {
@@ -41,43 +59,36 @@ export async function runPMTask(taskId: string, agentId: string, model: string) 
     await logEvent(`Confidence warning (${(score * 100).toFixed(0)}%) — proceeding with caution. Notes: ${reasons.join('; ')}`, 'warn');
   }
 
-  await logEvent('Reviewing CoS plan');
+  await logEvent('Reviewing CoS plan and directive');
   await logEvent('Drafting PRD');
-  await logEvent('Defining acceptance criteria');
+
   const directive = (payload.directive as string) ?? 'New product initiative';
+  const cosPlan = payload.cos_plan ? JSON.stringify(payload.cos_plan, null, 2) : 'No CoS plan provided';
 
-  const prd = {
-    prd_title: `PRD: ${directive.slice(0, 60)}`,
-    problem: `Users need ${directive.slice(0, 100)}. Current solutions are inadequate.`,
-    users: ['Power users', 'Enterprise teams', 'Individual contributors'],
-    non_goals: ['Building mobile apps in v1', 'Third-party integrations beyond MVP', 'Internationalization'],
-    requirements: [
-      'System must handle the core use case as described in directive',
-      'Performance: P95 response time < 500ms',
-      'Reliability: 99.9% uptime SLA',
-      'Security: All data encrypted at rest and in transit',
-    ],
-    acceptance_criteria: [
-      'Given a user submits a request, the system processes it within 2 seconds',
-      'Given an error occurs, the user sees a clear error message',
-      'Given the system is under load, performance does not degrade below acceptable thresholds',
-    ],
-    milestones: [
-      { name: 'Design complete', weeks: 1 },
-      { name: 'Development complete', weeks: 3 },
-      { name: 'QA complete', weeks: 4 },
-      { name: 'Launch', weeks: 5 },
-    ],
-  };
+  const userPrompt = `Directive:\n${directive}\n\nCoS Strategic Plan:\n${cosPlan}`;
 
-  const tokenIn = 900;
-  const tokenOut = 1100;
+  await logEvent('Calling LLM to generate PRD');
+  const { content, tokenIn, tokenOut } = await callLLM(model, SYSTEM_PROMPT, userPrompt);
+
+  interface PRDOutput {
+    prd_title: string;
+    problem: string;
+    users: string[];
+    non_goals: string[];
+    requirements: string[];
+    acceptance_criteria: string[];
+    milestones: Array<{ name: string; weeks: number }>;
+    open_questions?: string[];
+  }
+
+  const prd = parseJSON<PRDOutput>(content);
+
   const costEst = estimateCost(model, tokenIn, tokenOut);
   const latencyMs = Date.now() - startTime;
 
   await prisma.run.update({
     where: { id: run.id },
-    data: { status: 'succeeded', tokenIn, tokenOut, costEst, latencyMs, outputJson: prd, endedAt: new Date() },
+    data: { status: 'succeeded', tokenIn, tokenOut, costEst, latencyMs, outputJson: toJson(prd), endedAt: new Date() },
   });
 
   const artifact = await prisma.artifact.create({
@@ -88,27 +99,24 @@ export async function runPMTask(taskId: string, agentId: string, model: string) 
       type: 'PRD',
       title: prd.prd_title,
       summary: `PRD with ${prd.requirements.length} requirements and ${prd.milestones.length} milestones.`,
-      contentJson: prd,
+      contentJson: toJson(prd),
       visibility: 'internal',
     },
   });
 
   const uxAgent = await prisma.agent.findUnique({ where: { role: 'UX' } });
   if (uxAgent) {
-    // Governance: only CoS may create tasks for other roles.
-    // PM acts as a CoS delegate within the approved pipeline.
     await createDownstreamTask('CoS', {
       directiveId: task.directiveId,
       initiativeId: task.initiativeId,
       assignedRole: 'UX',
       assignedAgentId: uxAgent.id,
       priority: 4,
-      payloadJson: { prd, directive },
+      payloadJson: toJson({ prd, directive }),
     });
   }
 
   await logEvent(`PRD complete. Artifact: ${artifact.id}`);
-
   await markEvaluationOutcome(evaluationId, true);
   return { runId: run.id, artifactId: artifact.id, evaluationId };
 }

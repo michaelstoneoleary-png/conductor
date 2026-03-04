@@ -1,6 +1,31 @@
 import prisma from '../lib/prisma';
 import { estimateCost } from '../lib/cost';
 import { assessConfidence, markEvaluationOutcome } from '../lib/confidence';
+import { callLLM, parseJSON, toJson } from '../lib/llm';
+
+const SYSTEM_PROMPT = `You are a QA Engineer AI agent at an autonomous AI company called Conductor.
+Your role is to review a code change and its code review, then produce a QA report.
+
+You must respond with a single valid JSON object (no markdown, no prose outside JSON) with these exact fields:
+{
+  "overall_status": "pass" | "fail" | "conditional_pass",
+  "tests_run": 0,
+  "tests_passed": 0,
+  "tests_failed": 0,
+  "critical_bugs": ["bug description — these BLOCK release"],
+  "regression_risk": "low" | "medium" | "high",
+  "failed_tests": [
+    { "name": "test name", "severity": "minor" | "major" | "critical" }
+  ],
+  "coverage_assessment": "Assessment of test coverage completeness",
+  "release_recommendation": "Clear recommendation on whether to release"
+}
+
+Be specific to the actual code change being reviewed. Assess the test quality mentioned in the implementation plan.
+overall_status rules:
+- "pass": ready to ship
+- "conditional_pass": minor issues, can ship with fixes
+- "fail": do not ship, critical issues present`;
 
 export async function runQATask(taskId: string, agentId: string, model: string) {
   const task = await prisma.task.findUnique({ where: { id: taskId } });
@@ -18,7 +43,6 @@ export async function runQATask(taskId: string, agentId: string, model: string) 
     });
   };
 
-  // Pre-task confidence assessment
   const payload = task.payloadJson as Record<string, unknown>;
   const { score, reasons, action, evaluationId } = await assessConfidence('QA', agentId, taskId, payload);
 
@@ -39,30 +63,37 @@ export async function runQATask(taskId: string, agentId: string, model: string) 
     await logEvent(`Confidence warning (${(score * 100).toFixed(0)}%) — proceeding with caution. Notes: ${reasons.join('; ')}`, 'warn');
   }
 
-  await logEvent('Running test suite');
+  await logEvent('Running test suite analysis');
   await logEvent('Checking regression coverage');
 
-  const report = {
-    overall_status: 'pass' as const,
-    tests_run: 47,
-    tests_passed: 45,
-    tests_failed: 2,
-    critical_bugs: [],
-    regression_risk: 'low',
-    failed_tests: [
-      { name: 'Edge case: empty input handling', severity: 'minor' },
-      { name: 'Performance: response time under 2s load', severity: 'minor' },
-    ],
-  };
+  const review = payload.review ? JSON.stringify(payload.review, null, 2) : 'No code review provided';
+  const codeChange = payload.code_change ? JSON.stringify(payload.code_change, null, 2) : 'No code change provided';
 
-  const tokenIn = 600;
-  const tokenOut = 700;
+  const userPrompt = `Code Change:\n${codeChange}\n\nCode Review:\n${review}`;
+
+  await logEvent('Calling LLM to generate QA report');
+  const { content, tokenIn, tokenOut } = await callLLM(model, SYSTEM_PROMPT, userPrompt);
+
+  interface QAOutput {
+    overall_status: 'pass' | 'fail' | 'conditional_pass';
+    tests_run: number;
+    tests_passed: number;
+    tests_failed: number;
+    critical_bugs: string[];
+    regression_risk: 'low' | 'medium' | 'high';
+    failed_tests: Array<{ name: string; severity: 'minor' | 'major' | 'critical' }>;
+    coverage_assessment?: string;
+    release_recommendation?: string;
+  }
+
+  const report = parseJSON<QAOutput>(content);
+
   const costEst = estimateCost(model, tokenIn, tokenOut);
   const latencyMs = Date.now() - startTime;
 
   await prisma.run.update({
     where: { id: run.id },
-    data: { status: 'succeeded', tokenIn, tokenOut, costEst, latencyMs, outputJson: report, endedAt: new Date() },
+    data: { status: 'succeeded', tokenIn, tokenOut, costEst, latencyMs, outputJson: toJson(report), endedAt: new Date() },
   });
 
   const artifact = await prisma.artifact.create({
@@ -73,7 +104,7 @@ export async function runQATask(taskId: string, agentId: string, model: string) 
       type: 'QA_REPORT',
       title: 'QA Report',
       summary: `QA ${report.overall_status}: ${report.tests_passed}/${report.tests_run} tests passed. Regression risk: ${report.regression_risk}.`,
-      contentJson: report,
+      contentJson: toJson(report),
       visibility: 'internal',
     },
   });

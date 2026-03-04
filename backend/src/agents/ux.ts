@@ -2,6 +2,30 @@ import prisma from '../lib/prisma';
 import { estimateCost } from '../lib/cost';
 import { createDownstreamTask } from '../lib/governance';
 import { assessConfidence, markEvaluationOutcome } from '../lib/confidence';
+import { callLLM, parseJSON, toJson } from '../lib/llm';
+
+const SYSTEM_PROMPT = `You are a UX Designer AI agent at an autonomous AI company called Conductor.
+Your role is to receive a PRD from the Product Manager and produce a clear UX specification that a developer can implement.
+
+You must respond with a single valid JSON object (no markdown, no prose outside JSON) with these exact fields:
+{
+  "design_system": {
+    "colors": { "primary": "#hex", "background": "#hex", "surface": "#hex", "text": "#hex", "accent": "#hex" },
+    "typography": { "heading": "font name", "body": "font name", "mono": "font name" },
+    "spacing": "describe spacing system e.g. base-4",
+    "borderRadius": "value e.g. 8px"
+  },
+  "primary_flows": [
+    { "name": "flow name", "steps": ["step1", "step2"] }
+  ],
+  "screens": [
+    { "name": "screen name", "purpose": "what it does", "components": ["component1", "component2"] }
+  ],
+  "friction_risks": ["risk1", "risk2"],
+  "accessibility_notes": ["WCAG consideration 1"]
+}
+
+Be specific to the actual product described in the PRD. Choose colors, flows, and screens that make sense for this specific product.`;
 
 export async function runUXTask(taskId: string, agentId: string, model: string) {
   const task = await prisma.task.findUnique({ where: { id: taskId } });
@@ -19,7 +43,6 @@ export async function runUXTask(taskId: string, agentId: string, model: string) 
     });
   };
 
-  // Pre-task confidence assessment
   const payload = task.payloadJson as Record<string, unknown>;
   const { score, reasons, action, evaluationId } = await assessConfidence('UX', agentId, taskId, payload);
 
@@ -43,38 +66,35 @@ export async function runUXTask(taskId: string, agentId: string, model: string) 
   await logEvent('Reviewing PRD and requirements');
   await logEvent('Designing primary flows');
 
-  const uxSpec = {
-    design_system: {
-      colors: { primary: '#6366f1', background: '#0a0a0a', surface: '#111111', text: '#f4f4f5' },
-      typography: { heading: 'Inter', body: 'Inter', mono: 'JetBrains Mono' },
-      spacing: 'base-4',
-      borderRadius: '8px',
-    },
-    primary_flows: [
-      { name: 'Onboarding', steps: ['Landing', 'Sign up', 'Setup', 'First action'] },
-      { name: 'Core action', steps: ['Dashboard', 'Input', 'Processing', 'Result'] },
-      { name: 'Settings', steps: ['Profile', 'Preferences', 'Integrations', 'Billing'] },
-    ],
-    screens: [
-      { name: 'Dashboard', purpose: 'Overview of system state and key metrics', components: ['KPIBar', 'ActivityFeed', 'QuickActions'] },
-      { name: 'Detail view', purpose: 'Deep dive into a single entity', components: ['Header', 'Timeline', 'Metadata'] },
-      { name: 'Form', purpose: 'Create or edit entities', components: ['InputForm', 'Validation', 'Submit'] },
-    ],
-    friction_risks: [
-      'Complex onboarding may drop users before first value',
-      'Dense information without hierarchy leads to cognitive overload',
-      'Lack of feedback on async operations causes uncertainty',
-    ],
-  };
+  const prd = payload.prd ? JSON.stringify(payload.prd, null, 2) : 'No PRD provided';
+  const directive = (payload.directive as string) ?? '';
 
-  const tokenIn = 800;
-  const tokenOut = 900;
+  const userPrompt = `Directive:\n${directive}\n\nPRD:\n${prd}`;
+
+  await logEvent('Calling LLM to generate UX spec');
+  const { content, tokenIn, tokenOut } = await callLLM(model, SYSTEM_PROMPT, userPrompt);
+
+  interface UXOutput {
+    design_system: {
+      colors: Record<string, string>;
+      typography: Record<string, string>;
+      spacing: string;
+      borderRadius: string;
+    };
+    primary_flows: Array<{ name: string; steps: string[] }>;
+    screens: Array<{ name: string; purpose: string; components: string[] }>;
+    friction_risks: string[];
+    accessibility_notes?: string[];
+  }
+
+  const uxSpec = parseJSON<UXOutput>(content);
+
   const costEst = estimateCost(model, tokenIn, tokenOut);
   const latencyMs = Date.now() - startTime;
 
   await prisma.run.update({
     where: { id: run.id },
-    data: { status: 'succeeded', tokenIn, tokenOut, costEst, latencyMs, outputJson: uxSpec, endedAt: new Date() },
+    data: { status: 'succeeded', tokenIn, tokenOut, costEst, latencyMs, outputJson: toJson(uxSpec), endedAt: new Date() },
   });
 
   const artifact = await prisma.artifact.create({
@@ -85,22 +105,20 @@ export async function runUXTask(taskId: string, agentId: string, model: string) 
       type: 'UX_SPEC',
       title: 'UX Specification',
       summary: `UX spec with ${uxSpec.primary_flows.length} primary flows and ${uxSpec.screens.length} screens.`,
-      contentJson: uxSpec,
+      contentJson: toJson(uxSpec),
       visibility: 'internal',
     },
   });
 
   const dev1Agent = await prisma.agent.findUnique({ where: { role: 'Dev1' } });
   if (dev1Agent) {
-    // Governance: only CoS may create tasks for other roles.
-    // UX acts as a CoS delegate within the approved pipeline.
     await createDownstreamTask('CoS', {
       directiveId: task.directiveId,
       initiativeId: task.initiativeId,
       assignedRole: 'Dev1',
       assignedAgentId: dev1Agent.id,
       priority: 4,
-      payloadJson: { ux_spec: uxSpec },
+      payloadJson: toJson({ ux_spec: uxSpec, prd: payload.prd, directive }),
     });
   }
 

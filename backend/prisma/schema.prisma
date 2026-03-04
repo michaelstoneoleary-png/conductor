@@ -71,6 +71,10 @@ model Task {
   runs             Run[]
   artifacts        Artifact[]
   approvals        Approval[]
+
+  @@index([status])
+  @@index([assignedRole])
+  @@index([initiativeId])
 }
 
 model Run {
@@ -92,6 +96,10 @@ model Run {
   endedAt    DateTime?
   events     Event[]
   artifacts  Artifact[]
+
+  @@index([taskId])
+  @@index([status])
+  @@index([startedAt])
 }
 
 model Artifact {
@@ -108,6 +116,9 @@ model Artifact {
   contentJson  Json
   visibility   String      @default("internal")
   createdAt    DateTime    @default(now())
+
+  @@index([initiativeId])
+  @@index([visibility])
 }
 
 model Approval {
@@ -144,6 +155,9 @@ model Evaluation {
   outcomeSuccess    Boolean?
   notes             String?
   createdAt         DateTime @default(now())
+
+  @@index([agentId])
+  @@index([taskId])
 }
 
 model Settings {

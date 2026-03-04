@@ -17,10 +17,12 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.78.0",
     "@fastify/cors": "^9.0.1",
     "@prisma/client": "^5.22.0",
     "fastify": "^4.28.1",
     "node-cron": "^3.0.3",
+    "openai": "^6.25.0",
     "pino": "^9.5.0",
     "zod": "^3.23.8"
   },

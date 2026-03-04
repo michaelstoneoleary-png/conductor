@@ -1,9 +1,11 @@
 const rawBackendUrl = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8080';
 const BACKEND_URL = rawBackendUrl.startsWith('http') ? rawBackendUrl : `https://${rawBackendUrl}`;
+const API_KEY = process.env.NEXT_PUBLIC_CONDUCTOR_API_KEY ?? '';
 
 async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
+  const authHeaders: Record<string, string> = API_KEY ? { 'x-api-key': API_KEY } : {};
   const res = await fetch(`${BACKEND_URL}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    headers: { 'Content-Type': 'application/json', ...authHeaders, ...options?.headers },
     ...options,
   });
   if (!res.ok) {

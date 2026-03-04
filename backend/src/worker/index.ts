@@ -21,25 +21,24 @@ async function claimNextTask() {
     return null;
   }
 
-  const task = await prisma.task.findFirst({
-    where: {
-      status: 'queued',
-      agent: { isEnabled: true },
-    },
-    orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }],
-    include: { agent: true },
+  // Atomic claim via transaction to prevent race conditions between worker instances
+  return prisma.$transaction(async (tx) => {
+    const candidate = await tx.task.findFirst({
+      where: { status: 'queued', agent: { isEnabled: true } },
+      orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }],
+      include: { agent: true },
+    });
+
+    if (!candidate) return null;
+
+    const result = await tx.task.updateMany({
+      where: { id: candidate.id, status: 'queued' },
+      data: { status: 'running', startedAt: new Date() },
+    });
+
+    if (result.count === 0) return null;
+    return candidate;
   });
-
-  if (!task) return null;
-
-  const claimed = await prisma.task.updateMany({
-    where: { id: task.id, status: 'queued' },
-    data: { status: 'running', startedAt: new Date() },
-  });
-
-  if (claimed.count === 0) return null;
-
-  return task;
 }
 
 async function executeTask(task: Awaited<ReturnType<typeof claimNextTask>>) {

@@ -1,6 +1,36 @@
 import prisma from '../lib/prisma';
 import { estimateCost } from '../lib/cost';
 import { assessConfidence, markEvaluationOutcome } from '../lib/confidence';
+import { callLLM, parseJSON, toJson } from '../lib/llm';
+
+const SYSTEM_PROMPT = `You are a Growth & Marketing strategist AI agent at an autonomous AI company called Conductor.
+Your role is to develop a concrete, actionable growth strategy based on the product or initiative described.
+
+You must respond with a single valid JSON object (no markdown, no prose outside JSON) with these exact fields:
+{
+  "objective": "Clear growth objective with a measurable target",
+  "icp": {
+    "company_size": "e.g. 10-200 employees",
+    "industry": "target industries",
+    "buyer": "job title / role of economic buyer",
+    "pain_points": ["pain point 1", "pain point 2"]
+  },
+  "positioning": "One-sentence positioning statement",
+  "channels": [
+    { "name": "channel name", "priority": "high" | "medium" | "low", "rationale": "why this channel" }
+  ],
+  "experiments": [
+    { "name": "experiment name", "hypothesis": "if X then Y", "success_metric": "measurable outcome" }
+  ],
+  "metrics": {
+    "north_star": "the single most important metric",
+    "leading": ["leading indicator 1"],
+    "lagging": ["lagging indicator 1"]
+  },
+  "go_to_market_sequence": ["step 1", "step 2", "step 3"]
+}
+
+Be specific to the actual product or initiative. Tailor ICP, channels, and experiments to what's being built.`;
 
 export async function runGrowthTask(taskId: string, agentId: string, model: string) {
   const task = await prisma.task.findUnique({ where: { id: taskId } });
@@ -18,7 +48,6 @@ export async function runGrowthTask(taskId: string, agentId: string, model: stri
     });
   };
 
-  // Pre-task confidence assessment
   const payload = task.payloadJson as Record<string, unknown>;
   const { score, reasons, action, evaluationId } = await assessConfidence('Growth', agentId, taskId, payload);
 
@@ -42,40 +71,44 @@ export async function runGrowthTask(taskId: string, agentId: string, model: stri
   await logEvent('Analyzing market opportunity');
   await logEvent('Developing growth strategy');
 
-  const growthPlan = {
-    objective: 'Achieve product-market fit and initial growth in target segment',
-    icp: {
-      company_size: '10-200 employees',
-      industry: 'Technology, SaaS, Professional Services',
-      buyer: 'CTO, VP Engineering, or Founder',
-      pain_points: ['Too much manual coordination', 'Slow execution cycles', 'Lack of system visibility'],
-    },
-    positioning: 'The autonomous operating system for lean, high-velocity teams',
-    channels: [
-      { name: 'Content marketing', priority: 'high', rationale: 'Educates market on autonomous AI potential' },
-      { name: 'Developer community', priority: 'high', rationale: 'Early adopters who influence purchases' },
-      { name: 'Direct outbound', priority: 'medium', rationale: 'Targeted for specific ICP accounts' },
-      { name: 'Product-led growth', priority: 'medium', rationale: 'Free tier drives discovery' },
-    ],
-    experiments: [
-      { name: 'Freemium launch', hypothesis: 'Free tier drives word-of-mouth', success_metric: '100 signups in 30 days' },
-      { name: 'Technical blog series', hypothesis: 'Content drives inbound leads', success_metric: '500 organic visits/month' },
-    ],
-    metrics: {
-      north_star: 'Weekly active directives submitted',
-      leading: ['Signups', 'Activation rate', 'D7 retention'],
-      lagging: ['MRR', 'NPS', 'Churn rate'],
-    },
-  };
+  const contextParts: string[] = [];
+  if (payload.directive) contextParts.push(`Directive:\n${payload.directive}`);
+  if (payload.prd) contextParts.push(`PRD:\n${JSON.stringify(payload.prd, null, 2)}`);
+  if (payload.cos_plan) contextParts.push(`CoS Plan:\n${JSON.stringify(payload.cos_plan, null, 2)}`);
+  if (contextParts.length === 0) contextParts.push('Context: New product initiative requiring growth strategy');
 
-  const tokenIn = 800;
-  const tokenOut = 1000;
+  const userPrompt = contextParts.join('\n\n');
+
+  await logEvent('Calling LLM to generate growth plan');
+  const { content, tokenIn, tokenOut } = await callLLM(model, SYSTEM_PROMPT, userPrompt);
+
+  interface GrowthOutput {
+    objective: string;
+    icp: {
+      company_size: string;
+      industry: string;
+      buyer: string;
+      pain_points: string[];
+    };
+    positioning: string;
+    channels: Array<{ name: string; priority: 'high' | 'medium' | 'low'; rationale: string }>;
+    experiments: Array<{ name: string; hypothesis: string; success_metric: string }>;
+    metrics: {
+      north_star: string;
+      leading: string[];
+      lagging: string[];
+    };
+    go_to_market_sequence?: string[];
+  }
+
+  const growthPlan = parseJSON<GrowthOutput>(content);
+
   const costEst = estimateCost(model, tokenIn, tokenOut);
   const latencyMs = Date.now() - startTime;
 
   await prisma.run.update({
     where: { id: run.id },
-    data: { status: 'succeeded', tokenIn, tokenOut, costEst, latencyMs, outputJson: growthPlan, endedAt: new Date() },
+    data: { status: 'succeeded', tokenIn, tokenOut, costEst, latencyMs, outputJson: toJson(growthPlan), endedAt: new Date() },
   });
 
   const artifact = await prisma.artifact.create({
@@ -86,7 +119,7 @@ export async function runGrowthTask(taskId: string, agentId: string, model: stri
       type: 'GROWTH_PLAN',
       title: 'Growth Plan',
       summary: `Growth plan targeting ${growthPlan.icp.company_size} companies. ${growthPlan.channels.length} channels, ${growthPlan.experiments.length} experiments.`,
-      contentJson: growthPlan,
+      contentJson: toJson(growthPlan),
       visibility: 'internal',
     },
   });

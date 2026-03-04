@@ -2,6 +2,23 @@ import prisma from '../lib/prisma';
 import { estimateCost } from '../lib/cost';
 import { createDownstreamTask } from '../lib/governance';
 import { assessConfidence, markEvaluationOutcome } from '../lib/confidence';
+import { callLLM, parseJSON, toJson } from '../lib/llm';
+
+const SYSTEM_PROMPT = `You are a senior software developer (Dev1) AI agent at an autonomous AI company called Conductor.
+Your role is to receive a UX specification and PRD, then produce a detailed implementation plan for a code change.
+
+You must respond with a single valid JSON object (no markdown, no prose outside JSON) with these exact fields:
+{
+  "branch_name": "feature/short-descriptive-name",
+  "files_changed": ["path/to/file1.ts", "path/to/file2.tsx"],
+  "implementation_summary": "Detailed explanation of the approach and key decisions made",
+  "tests_written": ["description of test 1", "description of test 2"],
+  "assumptions": ["assumption made during implementation"],
+  "pr_description": "Full PR description suitable for code review, including what changed and why",
+  "tech_decisions": ["key technical decision with rationale"]
+}
+
+Be specific — reference the actual screens, flows, and components from the UX spec. Choose realistic file paths based on the product being built.`;
 
 export async function runDev1Task(taskId: string, agentId: string, model: string) {
   const task = await prisma.task.findUnique({ where: { id: taskId } });
@@ -19,7 +36,6 @@ export async function runDev1Task(taskId: string, agentId: string, model: string
     });
   };
 
-  // Pre-task confidence assessment
   const payload = task.payloadJson as Record<string, unknown>;
   const { score, reasons, action, evaluationId } = await assessConfidence('Dev1', agentId, taskId, payload);
 
@@ -40,54 +56,48 @@ export async function runDev1Task(taskId: string, agentId: string, model: string
     await logEvent(`Confidence warning (${(score * 100).toFixed(0)}%) — proceeding with caution. Notes: ${reasons.join('; ')}`, 'warn');
   }
 
-  await logEvent('Reviewing PM spec and UX design');
-  await logEvent('Implementing feature');
-  await logEvent('Writing tests');
+  await logEvent('Reviewing UX spec and PRD');
+  await logEvent('Planning implementation');
 
-  const codeChange = {
-    branch_name: `feature/conductor-${taskId.slice(-8)}`,
-    files_changed: [
-      'src/components/MainFeature.tsx',
-      'src/hooks/useFeatureData.ts',
-      'src/api/featureService.ts',
-      'tests/MainFeature.test.tsx',
-    ],
-    implementation_summary: 'Implemented core feature with React hooks for state management, Typescript interfaces, and full test coverage.',
-    tests_written: ['Unit tests for hooks', 'Integration tests for API calls', 'Component snapshot tests'],
-    assumptions: [
-      'Used existing design system components',
-      'Followed existing data fetching patterns',
-      'Maintained backward compatibility',
-    ],
-    pr_description: 'This PR implements the requested feature per the PRD and UX spec. All acceptance criteria are met. Test coverage at 85%.',
-  };
+  const uxSpec = payload.ux_spec ? JSON.stringify(payload.ux_spec, null, 2) : 'No UX spec provided';
+  const prd = payload.prd ? JSON.stringify(payload.prd, null, 2) : 'No PRD provided';
+  const directive = (payload.directive as string) ?? '';
+
+  const userPrompt = `Directive:\n${directive}\n\nPRD:\n${prd}\n\nUX Spec:\n${uxSpec}`;
+
+  await logEvent('Calling LLM to plan implementation');
+  const { content, tokenIn, tokenOut } = await callLLM(model, SYSTEM_PROMPT, userPrompt);
+
+  interface Dev1Output {
+    branch_name: string;
+    files_changed: string[];
+    implementation_summary: string;
+    tests_written: string[];
+    assumptions: string[];
+    pr_description: string;
+    tech_decisions?: string[];
+  }
+
+  const codeChange = parseJSON<Dev1Output>(content);
 
   if (task.targetEnv === 'prod') {
     await prisma.approval.create({
-      data: {
-        taskId,
-        requestedAction: 'Deploy to production',
-        status: 'pending',
-      },
+      data: { taskId, requestedAction: 'Deploy to production', status: 'pending' },
     });
-
     await prisma.run.update({
       where: { id: run.id },
-      data: { status: 'succeeded', tokenIn: 1500, tokenOut: 2000, costEst: estimateCost(model, 1500, 2000), latencyMs: Date.now() - startTime, outputJson: codeChange, endedAt: new Date() },
+      data: { status: 'succeeded', tokenIn, tokenOut, costEst: estimateCost(model, tokenIn, tokenOut), latencyMs: Date.now() - startTime, outputJson: toJson(codeChange), endedAt: new Date() },
     });
-
     await prisma.task.update({ where: { id: taskId }, data: { status: 'needs_approval' } });
     return { runId: run.id, halted: true, reason: 'Prod deployment requires approval', evaluationId };
   }
 
-  const tokenIn = 1500;
-  const tokenOut = 2000;
   const costEst = estimateCost(model, tokenIn, tokenOut);
   const latencyMs = Date.now() - startTime;
 
   await prisma.run.update({
     where: { id: run.id },
-    data: { status: 'succeeded', tokenIn, tokenOut, costEst, latencyMs, outputJson: codeChange, endedAt: new Date() },
+    data: { status: 'succeeded', tokenIn, tokenOut, costEst, latencyMs, outputJson: toJson(codeChange), endedAt: new Date() },
   });
 
   const artifact = await prisma.artifact.create({
@@ -98,22 +108,20 @@ export async function runDev1Task(taskId: string, agentId: string, model: string
       type: 'CODE_CHANGE',
       title: `Code Change: ${codeChange.branch_name}`,
       summary: `Changed ${codeChange.files_changed.length} files. ${codeChange.tests_written.length} test suites written.`,
-      contentJson: codeChange,
+      contentJson: toJson(codeChange),
       visibility: 'internal',
     },
   });
 
   const dev2Agent = await prisma.agent.findUnique({ where: { role: 'Dev2' } });
   if (dev2Agent) {
-    // Governance: only CoS may create tasks for other roles.
-    // Dev1 acts as a CoS delegate within the approved pipeline.
     await createDownstreamTask('CoS', {
       directiveId: task.directiveId,
       initiativeId: task.initiativeId,
       assignedRole: 'Dev2',
       assignedAgentId: dev2Agent.id,
       priority: 4,
-      payloadJson: { code_change: codeChange, dev1_task_id: taskId },
+      payloadJson: toJson({ code_change: codeChange, dev1_task_id: taskId, prd: payload.prd }),
     });
   }
 
